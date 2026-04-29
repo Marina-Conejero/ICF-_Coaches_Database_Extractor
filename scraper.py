@@ -422,7 +422,10 @@ def Runner(params: RunParams) -> dict:
                     if at_writer and scrape_run_id:
                         row_dict = dict(zip(headers_to_dict_keys, row))
                         try:
-                            result = at_writer.upsert_coach(row_dict, scrape_run_id)
+                            result = at_writer.upsert_coach(
+                                row_dict, scrape_run_id,
+                                applied_credentials=params.credentials,
+                            )
                             if result == "created":
                                 airtable_created += 1
                             elif result == "updated":

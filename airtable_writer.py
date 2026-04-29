@@ -126,6 +126,42 @@ def normalise_email(raw: str | None) -> str | None:
     return s if EMAIL_RE.match(s) else None
 
 
+def normalise_phone(raw: str | None, country_dialing_code: str | None = None) -> str | None:
+    """Best-effort E.164-style normalisation.
+
+    Examples (with country_dialing_code='353'):
+      '+353 (0) 861043805'  → '+353861043805'
+      '086 4011438'         → '+353864011438'
+      '00353 86 6025584'    → '+353866025584'
+      '87 6217522'          → '+353876217522'
+
+    If we can't determine the country code, we keep the raw '+...' form when
+    present, otherwise return the digits unchanged.
+    """
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    # Keep + and digits only.
+    s = re.sub(r"[^\d+]", "", s)
+    if not s:
+        return None
+    # 00<country> → +<country>
+    if s.startswith("00"):
+        s = "+" + s[2:]
+    # If we have a country code and the number doesn't start with +
+    if country_dialing_code and not s.startswith("+"):
+        # If the leading digits already match the country code, just prepend +
+        if s.startswith(country_dialing_code):
+            s = "+" + s
+        else:
+            # Strip national trunk prefix (leading 0s) and prepend country code
+            stripped = s.lstrip("0")
+            s = "+" + country_dialing_code + stripped
+    return s or None
+
+
 # ---------------------------------------------------------------------------
 # Writer
 # ---------------------------------------------------------------------------
@@ -138,7 +174,7 @@ class AirtableWriter:
             "Authorization": f"Bearer {pat}",
             "Content-Type": "application/json",
         })
-        self._country_cache: dict[str, str] | None = None
+        self._country_cache: dict[str, dict] | None = None
 
     @classmethod
     def from_env(cls) -> "AirtableWriter | None":
@@ -150,6 +186,8 @@ class AirtableWriter:
     # ----- internal helpers -----
 
     def _build_country_cache(self) -> None:
+        """Build a name (lowercased) → {id, code} lookup for the Countries table.
+        Aliases (USA, UK, Holland, etc.) point to the same canonical entry."""
         url = f"{API_BASE}/{self.base_id}/{COUNTRIES_TABLE}"
         records: list[dict] = []
         params: dict = {"pageSize": 100}
@@ -163,11 +201,13 @@ class AirtableWriter:
                 break
             params["offset"] = offset
             time.sleep(RATE_LIMIT_SLEEP)
-        cache: dict[str, str] = {}
+        cache: dict[str, dict] = {}
         for rec in records:
-            name = rec.get("fields", {}).get("Country Name")
+            fields = rec.get("fields", {})
+            name = fields.get("Country Name")
+            code = fields.get("ICF Code")
             if name:
-                cache[name.lower()] = rec["id"]
+                cache[name.lower()] = {"id": rec["id"], "code": code}
         # Common aliases
         aliases = {
             "usa": "United States", "u.s.a.": "United States", "us": "United States",
@@ -177,18 +217,22 @@ class AirtableWriter:
             "deutschland": "Germany", "holland": "Netherlands",
         }
         for alias, canonical in aliases.items():
-            target_id = cache.get(canonical.lower())
-            if target_id:
-                cache[alias] = target_id
+            entry = cache.get(canonical.lower())
+            if entry:
+                cache[alias] = entry
         self._country_cache = cache
 
     def country_id_for(self, country_name: str | None) -> str | None:
+        info = self.country_info(country_name)
+        return info["id"] if info else None
+
+    def country_info(self, country_name: str | None) -> dict | None:
+        """Return {id, code} for a country name, or None if not found."""
         if not country_name:
             return None
         if self._country_cache is None:
             self._build_country_cache()
-        norm = country_name.strip().lower()
-        return self._country_cache.get(norm)
+        return self._country_cache.get(country_name.strip().lower())
 
     # ----- public API -----
 
@@ -249,8 +293,14 @@ class AirtableWriter:
         records = r.json().get("records", [])
         return records[0] if records else None
 
-    def upsert_coach(self, row: dict, scrape_run_id: str) -> str:
+    def upsert_coach(self, row: dict, scrape_run_id: str,
+                     applied_credentials: list[str] | None = None) -> str:
         """Create or update a coach record from a scraper CSV row.
+
+        applied_credentials: the credential filter values passed to the scrape
+        (e.g. ['MCC']). Every coach in this scrape has these by definition, so
+        we make sure they end up in the Credentials field even when the
+        coach's displayed name doesn't mention them.
 
         Returns 'created' / 'updated' / 'skipped'."""
         email = normalise_email(row.get("Email"))
@@ -261,15 +311,22 @@ class AirtableWriter:
         city, country_str = parse_location(row.get("Location"))
         if not country_str:
             country_str = row.get("Country")  # fallback to scrape param
-        country_id = self.country_id_for(country_str)
+        country_info = self.country_info(country_str)
+        country_id = country_info["id"] if country_info else None
+        country_code = country_info.get("code") if country_info else None
 
         icf_creds, other_creds = split_credentials(row.get("Coach_Name") or row.get("Credentials"))
+        # Always include the applied filter credentials — ICF's MCC filter
+        # returned this coach, so they have MCC even if the headline omits it.
+        if applied_credentials:
+            icf_creds = sorted(set(icf_creds) | {c.upper() for c in applied_credentials
+                                                  if c.upper() in {"ACC", "PCC", "MCC", "ACTC"}})
 
         fields: dict[str, Any] = {
             "Email": email,
             "First Name": first,
             "Last Name": last,
-            "Phone": (row.get("Phone") or "").strip() or None,
+            "Phone": normalise_phone(row.get("Phone"), country_code),
             "Website": (row.get("Website") or "").strip() or None,
             "City": city,
             "Headline": row.get("Coach_Name") or None,
