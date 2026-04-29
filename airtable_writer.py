@@ -440,17 +440,18 @@ class AirtableWriter:
             return "skipped"
 
         first, last = split_name(row.get("Coach_Name"))
-        # Parse the Location string to discover the coach's REAL country
-        # (which may differ from the scrape filter — ICF's location filter
-        # returns coaches who serve a region, not who live there). Use the
-        # smart parser that knows about multi-word countries.
-        city, state, country_from_loc = self.parse_location_smart(row.get("Location"))
-        # Use the parsed country if it matched our lookup; else fall back
-        # to the scrape param Country (still better than nothing).
-        country_str = country_from_loc or row.get("Country")
+        # Parse Location for City + State (residence), but Country reflects
+        # the SERVICE country (the scrape's filter) — ICF's location filter
+        # is service-area, not residence. A coach in Italy serving Swiss
+        # clients gets Country=Switzerland, City=Bolzano, State=Bolzano.
+        city, state, _country_from_loc = self.parse_location_smart(row.get("Location"))
+        country_str = row.get("Country")  # scrape filter country
         country_info = self.country_info(country_str)
         country_id = country_info["id"] if country_info else None
-        country_code = country_info.get("code") if country_info else None
+        # Phone country code: prefer the residence country if known (so phone
+        # numbers normalise to the local format) else the service country
+        residence_info = self.country_info(_country_from_loc) if _country_from_loc else None
+        country_code = (residence_info or country_info or {}).get("code")
 
         icf_creds_raw, other_creds = split_credentials(row.get("Coach_Name") or row.get("Credentials"))
         icf_creds_set = set(icf_creds_raw)
@@ -549,6 +550,21 @@ class AirtableWriter:
                 fields["Scrape Run"] = existing_runs + [scrape_run_id]
             else:
                 fields.pop("Scrape Run", None)  # already linked, no-op
+
+            # Country (service area) ACCUMULATES too — a coach scraped under
+            # Germany + Switzerland + Austria filters serves all 3, and the
+            # link list should grow to reflect that. Don't drop existing.
+            if "Country" in fields:
+                existing_countries = list(preserved.get("Country") or [])
+                new_country_ids = list(fields["Country"])
+                merged = list(existing_countries)
+                for cid in new_country_ids:
+                    if cid not in merged:
+                        merged.append(cid)
+                if merged != existing_countries:
+                    fields["Country"] = merged
+                else:
+                    fields.pop("Country", None)  # no change
 
             # Credentials REPLACE (not accumulate) — the headline is the
             # source of truth for the coach's current ICF credential level.
