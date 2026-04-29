@@ -162,6 +162,22 @@ def split_multiselect(raw: str | None) -> list[str]:
     return [p.strip() for p in raw.split(",") if p.strip()]
 
 
+_COMMA_RE = re.compile(r",\s*")
+
+
+def normalise_commas(raw: str | None) -> str | None:
+    """Replace any sequence of comma + whitespace with ', '. Cosmetic — used
+    for text fields that store comma-separated values (Industry Sectors,
+    Coaching Themes, Positions Held, Degrees, etc.) so they read cleanly.
+    """
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    return _COMMA_RE.sub(", ", s) or None
+
+
 def parse_yesno(raw: str | None) -> bool:
     if not raw:
         return False
@@ -293,6 +309,54 @@ class AirtableWriter:
             self._build_country_cache()
         return self._country_cache.get(country_name.strip().lower())
 
+    def parse_location_smart(self, loc: str | None
+                             ) -> tuple[str | None, str | None, str | None]:
+        """Use the Countries cache to find the longest matching country at
+        the end of the Location string. Handles multi-word countries
+        ('Hong Kong', 'United States') AND avoids treating state codes
+        ('ON CANADA') as part of the country.
+
+        Returns (city, state, canonical_country_name).
+        """
+        if not loc:
+            return None, None, None
+        if self._country_cache is None:
+            self._build_country_cache()
+
+        s = str(loc).strip()
+        words = s.split()
+
+        # Try longest country name first (4 words → 1 word)
+        for n in range(4, 0, -1):
+            if len(words) < n:
+                continue
+            candidate = " ".join(words[-n:]).strip().rstrip(",").strip()
+            entry = self._country_cache.get(candidate.lower())
+            if entry:
+                # Strip country off; what remains is "City, optional State"
+                remaining = " ".join(words[:-n]).strip().rstrip(",").strip()
+                parts = [p.strip() for p in remaining.split(",") if p.strip()]
+                city = parts[0] if parts else None
+                state = ", ".join(parts[1:]) if len(parts) > 1 else None
+                # Look up the canonical (proper case) country name
+                canonical_country = None
+                for k, v in self._country_cache.items():
+                    if v == entry:
+                        canonical_country = k.title() if k.islower() else k
+                        break
+                return city, state, canonical_country or candidate.title()
+
+        # No country match in lookup — fall back to naive parsing
+        parts = [p.strip() for p in s.split(",")]
+        if len(parts) == 1:
+            return None, None, parts[0] or None
+        city = parts[0] or None
+        last = parts[-1]
+        last_words = last.split()
+        if len(last_words) == 1:
+            return city, None, last
+        return city, " ".join(last_words[:-1]), last_words[-1]
+
     # ----- public API -----
 
     def start_scrape_run(self, run_label: str, params: dict) -> str:
@@ -376,14 +440,14 @@ class AirtableWriter:
             return "skipped"
 
         first, last = split_name(row.get("Coach_Name"))
-        # Prefer scrape param Country (always correct) over Location-parsed.
-        # Pass it to parse_location_v3 so multi-word countries are handled.
-        country_str = row.get("Country")
-        city, state, _country_from_loc = parse_location_v3(
-            row.get("Location"), known_country=country_str
-        )
-        if not country_str:
-            country_str = _country_from_loc
+        # Parse the Location string to discover the coach's REAL country
+        # (which may differ from the scrape filter — ICF's location filter
+        # returns coaches who serve a region, not who live there). Use the
+        # smart parser that knows about multi-word countries.
+        city, state, country_from_loc = self.parse_location_smart(row.get("Location"))
+        # Use the parsed country if it matched our lookup; else fall back
+        # to the scrape param Country (still better than nothing).
+        country_str = country_from_loc or row.get("Country")
         country_info = self.country_info(country_str)
         country_id = country_info["id"] if country_info else None
         country_code = country_info.get("code") if country_info else None
@@ -435,16 +499,16 @@ class AirtableWriter:
             "Headline": row.get("Coach_Name") or None,
             "Credentials": icf_creds or None,
             "Other Certifications": ", ".join(other_creds) if other_creds else None,
-            "Coaching Themes": row.get("Coaching Themes") or None,
+            "Coaching Themes": normalise_commas(row.get("Coaching Themes")),
             "Coaching Methods": split_multiselect(row.get("Coaching Methods")) or None,
             "Fluent Languages": split_multiselect(row.get("Fluent Languages")) or None,
             "Type of Client": split_multiselect(row.get("Type of Client")) or None,
             "Org Client Types": split_multiselect(row.get("Organizational Client Types")) or None,
-            "Industry Sectors": row.get("Industry Sectors Coached") or None,
+            "Industry Sectors": normalise_commas(row.get("Industry Sectors Coached")),
             "Level of Client": split_multiselect(row.get("Positions Held")) or None,
             "Coached Organizations": split_multiselect(row.get("Coached Organizations")) or None,
-            "Positions Held": row.get("Positions Held") or None,
-            "Degrees": row.get("Degrees") or None,
+            "Positions Held": normalise_commas(row.get("Positions Held")),
+            "Degrees": normalise_commas(row.get("Degrees")),
             "Rate": row.get("Rate") or None,
             "Fee Range": row.get("Fee Range") or None,
             "Willing to Relocate": parse_yesno(row.get("Willing to Relocate")),

@@ -581,56 +581,28 @@ def Runner(params: RunParams) -> dict:
                     ),
                 )
             elif is_partial:
-                # Build a user-friendly summary that explains what happened
-                # in plain language. Technical details follow at the bottom
-                # for engineers who want to debug.
+                # Compact log for the SINGLE country this Scrape Run covers.
+                # Brief-level multi-country aggregation lives on the Brief.
                 missed = expected_total - captured_total
-                summary_lines = []
+                lines: list[str] = []
                 if expected_total == 0 and captured_total == 0:
-                    summary_lines.append(
-                        "ICF returned no coaches matching this brief's filters. "
-                        "The combination may be too narrow — try removing one filter "
-                        "(e.g. drop a language requirement) and re-run."
-                    )
+                    lines.append("⚠️ No coaches matched these filters.")
+                    lines.append("The combination may be too narrow — try removing one filter and re-run.")
                 elif missed > 0:
-                    summary_lines.append(
-                        f"Captured {captured_total} coaches but ICF reported {expected_total}. "
-                        f"{missed} coach(es) were missed because their profile pages "
-                        f"didn't load in time during the scrape."
-                    )
-                    summary_lines.append("")
-                    summary_lines.append(
-                        "What this means: the data you have is correct, just "
-                        "incomplete. Re-running the same brief usually captures "
-                        "the missing coaches (failures are typically transient)."
-                    )
+                    lines.append(f"📊 Captured {captured_total} of {expected_total} coaches.")
+                    lines.append(f"⚠️ {missed} missed (ICF page timeouts) — re-run the brief to retry.")
                 else:
-                    summary_lines.append(
-                        f"Captured {captured_total} coaches with "
-                        f"{len(all_errors)} non-fatal warning(s) during the scrape. "
-                        "The data captured is reliable; the warnings are "
-                        "ICF page hiccups that didn't drop any coaches."
-                    )
-                summary_lines.append("")
-                summary_lines.append("=" * 50)
-                summary_lines.append("Per-country breakdown:")
-                for d in aggregate_diagnostics:
-                    cn = d.get("country", "?")
-                    cap = d.get("captured_total", 0)
-                    exp = d.get("expected_total_cards", 0)
-                    pages = d.get("pages_seen", 0)
-                    errs = len(d.get("errors", []))
-                    summary_lines.append(
-                        f"  • {cn}: captured {cap}/{exp} across {pages} page(s), "
-                        f"{errs} warning(s)"
-                    )
-                summary_lines.append("")
-                summary_lines.append("Technical detail (first 30 errors):")
-                summary_lines.extend(all_errors[:30])
+                    lines.append(f"✅ Captured {captured_total} coaches with {len(all_errors)} minor warnings.")
+                if all_errors:
+                    lines.append("")
+                    lines.append(f"Technical detail ({len(all_errors)} error(s)):")
+                    lines.append(f"  • {all_errors[0]}")
+                    if len(all_errors) > 1:
+                        lines.append(f"  • …and {len(all_errors) - 1} more")
                 at_writer.finish_scrape_run(
                     scrape_run_id,
                     status="Partial",
-                    error_log="\n".join(summary_lines),
+                    error_log="\n".join(lines),
                 )
             else:
                 at_writer.finish_scrape_run(scrape_run_id, status="Completed")
