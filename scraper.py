@@ -91,9 +91,15 @@ OUTPUT_HEADERS = [
     "Industry Sectors Coached", "Positions Held",
     "Has Prior Experience Delivering Coach Skills Training to Managers/Leaders",
     "Degrees", "Gender", "Age", "Fluent Languages", "Can Provide",
+    "ICF Profile URL",
     # Run metadata appended by Runner:
     "Country", "Run_Label", "Scraped_At",
 ]
+
+ICF_PROFILE_URL_TEMPLATE = (
+    "https://apps.coachingfederation.org/eweb/CCFDynamicPage.aspx"
+    "?webcode=ccfcoachprofileview&coachcstkey={key}"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +259,8 @@ def extract_profile_row(browser: webdriver.Chrome,
         get_inner_text(browser, PROFILE_FIELD_IDS["address"]),
         get_inner_text(browser, PROFILE_FIELD_IDS["fee"]),
     ] + get_table_data(browser)
+    # Append the ICF profile URL as a stable click-through link
+    row.append(ICF_PROFILE_URL_TEMPLATE.format(key=coach_value))
 
     browser.close()
     browser.switch_to.window(browser.window_handles[-1])

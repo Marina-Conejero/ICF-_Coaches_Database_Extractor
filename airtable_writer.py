@@ -75,37 +75,60 @@ def parse_location(loc: str | None) -> tuple[str | None, str | None]:
     return city, country
 
 
-def parse_location_v3(loc: str | None) -> tuple[str | None, str | None, str | None]:
+def parse_location_v3(loc: str | None,
+                      known_country: str | None = None
+                      ) -> tuple[str | None, str | None, str | None]:
     """Return (city, state_province, country) from a Location string.
 
-    Handles ICF-style strings like:
-      'Munich, GERMANY'                → ('Munich',  None,         'GERMANY')
-      'Toronto, ON CANADA'             → ('Toronto', 'ON',         'CANADA')
-      'Glenageary, Dublin IRELAND'     → ('Glenageary','Dublin',   'IRELAND')
-      'Lismore, Co Waterford IRELAND'  → ('Lismore', 'Co Waterford','IRELAND')
+    If `known_country` is supplied (the scraper always knows which country it
+    just scraped), strip that country off the end of the Location string
+    before parsing city/state. This handles multi-word countries like
+    'Hong Kong', 'United States', etc., which a naive last-word approach
+    would mangle.
+
+    Examples:
+      ('Munich, GERMANY', 'Germany')                 → ('Munich',     None,           'Germany')
+      ('Toronto, ON CANADA', 'Canada')               → ('Toronto',    'ON',           'Canada')
+      ('Tsimshatsui, Kowloon HONG KONG', 'Hong Kong')→ ('Tsimshatsui','Kowloon',      'Hong Kong')
+      ('Lismore, Co Waterford IRELAND', 'Ireland')   → ('Lismore',    'Co Waterford', 'Ireland')
     """
     if not loc:
         return None, None, None
     s = loc.strip()
+
+    # If we know the country, strip it from the end (case-insensitive)
+    country_used = known_country
+    if known_country:
+        pattern = re.compile(re.escape(known_country) + r'\s*$', re.IGNORECASE)
+        s = pattern.sub("", s).strip().rstrip(",").strip()
+
     parts = [p.strip() for p in s.split(",")]
-    if not parts:
-        return None, None, None
-    if len(parts) == 1:
-        return None, None, parts[0] or None
-    city = parts[0] or None
-    if len(parts) >= 3:
-        state = parts[1] or None
-        country = parts[-1] or None
-    else:
-        last = parts[-1]
-        words = last.split()
-        if len(words) <= 1:
-            state = None
-            country = last or None
+    if not parts or (len(parts) == 1 and not parts[0]):
+        return None, None, country_used
+
+    if not country_used:
+        # Fallback to old logic when we don't have a known country
+        if len(parts) == 1:
+            return None, None, parts[0] or None
+        city = parts[0] or None
+        if len(parts) >= 3:
+            state = parts[1] or None
+            country = parts[-1] or None
         else:
-            state = " ".join(words[:-1])
-            country = words[-1]
-    return city, state, country
+            last = parts[-1]
+            words = last.split()
+            if len(words) <= 1:
+                state = None
+                country = last or None
+            else:
+                state = " ".join(words[:-1])
+                country = words[-1]
+        return city, state, country
+
+    # Country known + already stripped → remaining is city + optional state
+    city = parts[0] or None
+    state = ", ".join(p for p in parts[1:] if p) or None
+    return city, state, country_used
 
 
 def split_credentials(raw: str | None) -> tuple[list[str], list[str]]:
@@ -150,6 +173,16 @@ def normalise_email(raw: str | None) -> str | None:
         return None
     s = str(raw).strip().lower()
     return s if EMAIL_RE.match(s) else None
+
+
+def normalise_url(raw: str | None) -> str | None:
+    """Strip ICF's 'Unspecified' placeholder. Return None for empty / placeholder."""
+    if not raw:
+        return None
+    s = str(raw).strip()
+    if not s or s.lower().endswith("unspecified") or "://unspecified" in s.lower():
+        return None
+    return s
 
 
 def normalise_phone(raw: str | None, country_dialing_code: str | None = None) -> str | None:
@@ -343,26 +376,34 @@ class AirtableWriter:
             return "skipped"
 
         first, last = split_name(row.get("Coach_Name"))
-        city, state, country_str = parse_location_v3(row.get("Location"))
+        # Prefer scrape param Country (always correct) over Location-parsed.
+        # Pass it to parse_location_v3 so multi-word countries are handled.
+        country_str = row.get("Country")
+        city, state, _country_from_loc = parse_location_v3(
+            row.get("Location"), known_country=country_str
+        )
         if not country_str:
-            country_str = row.get("Country")  # fallback to scrape param
+            country_str = _country_from_loc
         country_info = self.country_info(country_str)
         country_id = country_info["id"] if country_info else None
         country_code = country_info.get("code") if country_info else None
 
         icf_creds, other_creds = split_credentials(row.get("Coach_Name") or row.get("Credentials"))
-        # Always include the applied filter credentials — ICF's MCC filter
-        # returned this coach, so they have MCC even if the headline omits it.
-        if applied_credentials:
-            icf_creds = sorted(set(icf_creds) | {c.upper() for c in applied_credentials
-                                                  if c.upper() in {"ACC", "PCC", "MCC", "ACTC"}})
+        # Trust headline first. If the headline didn't mention any ICF
+        # credential and the filter was for exactly one, we know they have
+        # that one — add it. Multi-credential filters are intentionally
+        # ambiguous (we don't know which one), so we don't over-assign.
+        if not icf_creds and applied_credentials and len(applied_credentials) == 1:
+            single = applied_credentials[0].upper()
+            if single in {"ACC", "PCC", "MCC", "ACTC"}:
+                icf_creds = [single]
 
         fields: dict[str, Any] = {
             "Email": email,
             "First Name": first,
             "Last Name": last,
             "Phone": normalise_phone(row.get("Phone"), country_code),
-            "Website": (row.get("Website") or "").strip() or None,
+            "Website": normalise_url(row.get("Website")),
             "City": city,
             "State Province": state,
             "Headline": row.get("Coach_Name") or None,
@@ -386,6 +427,7 @@ class AirtableWriter:
                 row.get("Has Prior Experience Delivering Coach Skills Training to Managers/Leaders")
             ),
             "Can Provide": split_multiselect(row.get("Can Provide")) or None,
+            "ICF Profile URL": normalise_url(row.get("ICF Profile URL")),
             "Source": "ICF Scrape",
             "Scrape Run": [scrape_run_id],
             "Last Scraped At": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
@@ -418,11 +460,10 @@ class AirtableWriter:
             else:
                 fields.pop("Scrape Run", None)  # already linked, no-op
 
-            # Credentials accumulate too — never strip what was there before.
-            existing_creds = list(preserved.get("Credentials") or [])
-            if "Credentials" in fields:
-                merged = sorted(set(existing_creds) | set(fields["Credentials"]))
-                fields["Credentials"] = merged
+            # Credentials REPLACE (not accumulate) — the headline is the
+            # source of truth for the coach's current ICF credential level.
+            # Over-assignment from an earlier multi-credential filter run
+            # gets corrected on next re-scrape.
 
             r = self.session.patch(url, json={"fields": fields, "typecast": True})
             if r.status_code >= 400:
