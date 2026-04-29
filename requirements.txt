@@ -1,5 +1,3 @@
-pandas
-webdriver_manager
-selenium
-streamlit
-
+selenium>=4.15
+webdriver-manager>=4.0
+requests>=2.31

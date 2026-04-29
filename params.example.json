@@ -1,0 +1,23 @@
+{
+  "run_label": "DACH_April_2026",
+  "countries": [
+    {"name": "Germany", "code": "49"},
+    {"name": "Switzerland", "code": "41"},
+    {"name": "Austria", "code": "43"}
+  ],
+  "credentials": ["ACC", "PCC"],
+  "languages": ["German", "English"],
+  "coached_organizations": ["Global/Multi-national"],
+  "output_path": "out/DACH_April_2026.csv",
+  "headless": true,
+  "page_load_wait": 30,
+  "_comment": [
+    "Run this with: python3 scraper.py --params params.example.json",
+    "All keys except 'countries' are optional. If credentials is omitted,",
+    "all three (ACC/PCC/MCC) get checked. coached_organizations accepts",
+    "'Global/Multi-national' and/or 'Nonprofit/NGO'.",
+    "languages must match the exact display names in ICF's Fluent Languages",
+    "modal (e.g. 'English', 'German', 'French', 'Mandarin').",
+    "country.name must match the display name in ICF's Locations modal."
+  ]
+}

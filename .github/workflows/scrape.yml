@@ -1,0 +1,190 @@
+name: ICF Scrape
+
+# Triggered three ways:
+#  1. repository_dispatch — n8n POSTs to GitHub API when a Search Brief is created
+#     in Airtable. Payload becomes the scraper params.
+#  2. workflow_dispatch — manual trigger from the Actions UI for ad-hoc runs.
+#  3. schedule — once-a-quarter refresh (Apr/Jul/Oct/Jan, 1st of the month, 02:00 UTC).
+#
+# Strategy: each country in the params runs as its own job in a matrix. This
+# keeps any single job under the 6-hour cap and makes per-country failures
+# isolated (one bad country doesn't kill the whole batch).
+
+on:
+  repository_dispatch:
+    types: [run-scraper]
+  workflow_dispatch:
+    inputs:
+      run_label:
+        description: 'Run label (e.g. DACH_April_2026)'
+        required: true
+        default: 'manual_run'
+      countries:
+        description: 'JSON array of {name, code} country objects'
+        required: true
+        default: '[{"name":"Germany","code":"49"}]'
+      credentials:
+        description: 'JSON array of credentials (ACC/PCC/MCC)'
+        required: false
+        default: '["ACC","PCC","MCC"]'
+      languages:
+        description: 'JSON array of language names'
+        required: false
+        default: '[]'
+      coached_organizations:
+        description: 'JSON array of org types (Global/Multi-national, Nonprofit/NGO)'
+        required: false
+        default: '[]'
+  schedule:
+    - cron: '0 2 1 1,4,7,10 *'
+
+jobs:
+  # ---- Job 1: build the matrix from the trigger payload --------------------
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      countries: ${{ steps.build.outputs.countries }}
+      run_label: ${{ steps.build.outputs.run_label }}
+      shared_params: ${{ steps.build.outputs.shared_params }}
+    steps:
+      - id: build
+        name: Build country matrix from payload
+        env:
+          DISPATCH_PAYLOAD: ${{ toJson(github.event.client_payload) }}
+          MANUAL_RUN_LABEL: ${{ github.event.inputs.run_label }}
+          MANUAL_COUNTRIES: ${{ github.event.inputs.countries }}
+          MANUAL_CREDENTIALS: ${{ github.event.inputs.credentials }}
+          MANUAL_LANGUAGES: ${{ github.event.inputs.languages }}
+          MANUAL_COACHED: ${{ github.event.inputs.coached_organizations }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          src = os.environ.get("DISPATCH_PAYLOAD", "{}")
+          payload = json.loads(src) if src and src != "null" else {}
+          if not payload:
+              payload = {
+                  "run_label": os.environ.get("MANUAL_RUN_LABEL", "manual_run"),
+                  "countries": json.loads(os.environ.get("MANUAL_COUNTRIES", "[]") or "[]"),
+                  "credentials": json.loads(os.environ.get("MANUAL_CREDENTIALS", "[]") or "[]"),
+                  "languages": json.loads(os.environ.get("MANUAL_LANGUAGES", "[]") or "[]"),
+                  "coached_organizations": json.loads(os.environ.get("MANUAL_COACHED", "[]") or "[]"),
+              }
+          countries = payload.get("countries") or []
+          if not countries:
+              raise SystemExit("ERROR: no countries in payload")
+          shared = {k: v for k, v in payload.items() if k != "countries"}
+          shared.setdefault("run_label", "manual_run")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write(f"countries={json.dumps(countries)}\n")
+              fh.write(f"run_label={shared['run_label']}\n")
+              fh.write(f"shared_params={json.dumps(shared)}\n")
+          print("Matrix:", countries)
+          PY
+
+  # ---- Job 2: scrape — one job per country ---------------------------------
+  scrape:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 350    # 5h50m — under the 6h GitHub cap
+    strategy:
+      fail-fast: false
+      max-parallel: 3        # ICF is rate-sensitive; keep concurrency conservative
+      matrix:
+        country: ${{ fromJson(needs.prepare.outputs.countries) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build per-country params.json
+        env:
+          COUNTRY: ${{ toJson(matrix.country) }}
+          SHARED: ${{ needs.prepare.outputs.shared_params }}
+          RUN_LABEL: ${{ needs.prepare.outputs.run_label }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          country = json.loads(os.environ["COUNTRY"])
+          shared = json.loads(os.environ["SHARED"])
+          run_label = os.environ["RUN_LABEL"]
+          params = dict(shared)
+          params["countries"] = [country]
+          params["run_label"] = f"{run_label}__{country['name'].replace(' ', '_')}"
+          params["output_path"] = f"out/{params['run_label']}.csv"
+          params["headless"] = True
+          with open("params.json", "w") as f:
+              json.dump(params, f, indent=2)
+          print(json.dumps(params, indent=2))
+          PY
+
+      - name: Run scraper
+        env:
+          AIRTABLE_PAT: ${{ secrets.AIRTABLE_PAT }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GITHUB_TRIGGERED_BY: ${{ github.event.client_payload.submitter || github.actor }}
+        run: |
+          mkdir -p out
+          python3 scraper.py --params params.json
+
+      - name: Upload CSV artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: scrape-${{ matrix.country.name }}-${{ needs.prepare.outputs.run_label }}
+          path: out/*.csv
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # ---- Job 3: aggregate — combine per-country CSVs into one ----------------
+  aggregate:
+    needs: [prepare, scrape]
+    if: always() && needs.scrape.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Combine per-country CSVs
+        run: |
+          mkdir -p out
+          python3 - <<'PY'
+          import csv, glob, os
+          run_label = "${{ needs.prepare.outputs.run_label }}"
+          merged_path = f"out/{run_label}_combined.csv"
+          rows_total = 0
+          headers_written = False
+          with open(merged_path, "w", newline="", encoding="utf-8") as out:
+              writer = csv.writer(out)
+              for csv_path in sorted(glob.glob("artifacts/**/*.csv", recursive=True)):
+                  with open(csv_path, newline="", encoding="utf-8") as f:
+                      reader = csv.reader(f)
+                      header = next(reader, None)
+                      if header and not headers_written:
+                          writer.writerow(header)
+                          headers_written = True
+                      for row in reader:
+                          writer.writerow(row)
+                          rows_total += 1
+          print(f"Merged into {merged_path}: {rows_total} rows from "
+                f"{len(glob.glob('artifacts/**/*.csv', recursive=True))} per-country files")
+          PY
+
+      - name: Upload combined CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: combined-${{ needs.prepare.outputs.run_label }}
+          path: out/*.csv
+          retention-days: 30
