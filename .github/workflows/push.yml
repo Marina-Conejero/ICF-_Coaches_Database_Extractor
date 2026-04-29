@@ -1,0 +1,36 @@
+name: Push Coaches to Workable
+
+# Triggered by an Airtable Automation when Caitlin clicks the
+# "Push Marked Coaches" button in the Push Control table.
+# event_type: 'push-coaches', no client_payload required.
+#
+# Also runnable manually from the Actions tab via workflow_dispatch
+# for ad-hoc pushes.
+
+on:
+  repository_dispatch:
+    types: [push-coaches]
+  workflow_dispatch: {}
+
+jobs:
+  push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30   # Plenty for hundreds of coaches at ~3 sec each
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Run push
+        env:
+          AIRTABLE_PAT: ${{ secrets.AIRTABLE_PAT }}
+          WORKABLE_API_KEY: ${{ secrets.WORKABLE_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python3 push_to_workable.py
