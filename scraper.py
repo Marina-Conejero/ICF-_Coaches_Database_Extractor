@@ -398,46 +398,53 @@ def Runner(params: RunParams) -> dict:
     airtable_updated = 0
     airtable_skipped = 0
     scraped_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    fatal_error: Exception | None = None
 
     headers_to_dict_keys = OUTPUT_HEADERS  # rows align to this order
 
-    with open(params.output_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(OUTPUT_HEADERS)
+    try:
+        with open(params.output_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(OUTPUT_HEADERS)
 
-        for country in params.countries:
-            browser = init_browser(headless=params.headless)
-            try:
-                for row in run_country(browser, country, params):
-                    while len(row) < len(OUTPUT_HEADERS) - 3:
-                        row.append("")
-                    row = list(row[: len(OUTPUT_HEADERS) - 3]) + [
-                        country.name, params.run_label, scraped_at,
-                    ]
-                    writer.writerow(row)
-                    total_rows += 1
-                    per_country[country.name] = per_country.get(country.name, 0) + 1
+            for country in params.countries:
+                browser = init_browser(headless=params.headless)
+                try:
+                    for row in run_country(browser, country, params):
+                        while len(row) < len(OUTPUT_HEADERS) - 3:
+                            row.append("")
+                        row = list(row[: len(OUTPUT_HEADERS) - 3]) + [
+                            country.name, params.run_label, scraped_at,
+                        ]
+                        writer.writerow(row)
+                        total_rows += 1
+                        per_country[country.name] = per_country.get(country.name, 0) + 1
 
-                    # Airtable write-back, per row, with retry on transient failures
-                    if at_writer and scrape_run_id:
-                        row_dict = dict(zip(headers_to_dict_keys, row))
-                        try:
-                            result = at_writer.upsert_coach(
-                                row_dict, scrape_run_id,
-                                applied_credentials=params.credentials,
-                            )
-                            if result == "created":
-                                airtable_created += 1
-                            elif result == "updated":
-                                airtable_updated += 1
-                            else:
+                        # Airtable write-back, per row, with retry on transient failures
+                        if at_writer and scrape_run_id:
+                            row_dict = dict(zip(headers_to_dict_keys, row))
+                            try:
+                                result = at_writer.upsert_coach(
+                                    row_dict, scrape_run_id,
+                                    applied_credentials=params.credentials,
+                                )
+                                if result == "created":
+                                    airtable_created += 1
+                                elif result == "updated":
+                                    airtable_updated += 1
+                                else:
+                                    airtable_skipped += 1
+                            except Exception as exc:
                                 airtable_skipped += 1
-                        except Exception as exc:
-                            airtable_skipped += 1
-                            print(f"WARN: Airtable upsert failed for "
-                                  f"{row_dict.get('Email','?')}: {exc}", file=sys.stderr)
-            finally:
-                browser.quit()
+                                print(f"WARN: Airtable upsert failed for "
+                                      f"{row_dict.get('Email','?')}: {exc}", file=sys.stderr)
+                finally:
+                    browser.quit()
+    except Exception as exc:
+        # Capture the failure but let the finally block run so we mark
+        # the Scrape Run as Failed and log details.
+        fatal_error = exc
+        print(f"\n*** Scraper aborted: {exc}", file=sys.stderr)
 
     duration = time.time() - started
     summary = {
@@ -446,6 +453,7 @@ def Runner(params: RunParams) -> dict:
         "per_country": per_country,
         "duration_seconds": round(duration, 1),
         "output_path": params.output_path,
+        "fatal_error": str(fatal_error) if fatal_error else None,
     }
     if at_writer:
         summary["airtable"] = {
@@ -455,12 +463,29 @@ def Runner(params: RunParams) -> dict:
             "skipped": airtable_skipped,
         }
         try:
-            at_writer.finish_scrape_run(scrape_run_id, status="Completed")
+            if fatal_error:
+                at_writer.finish_scrape_run(
+                    scrape_run_id,
+                    status="Failed",
+                    error_log=f"Scraper aborted after {total_rows} rows: {fatal_error}",
+                )
+            elif total_rows == 0:
+                at_writer.finish_scrape_run(
+                    scrape_run_id,
+                    status="Partial",
+                    error_log="Scrape completed but returned 0 coaches — verify filters",
+                )
+            else:
+                at_writer.finish_scrape_run(scrape_run_id, status="Completed")
         except Exception as exc:
             print(f"WARN: failed to finalise Scrape Run: {exc}", file=sys.stderr)
 
     print(f"\n=== Done ===")
     print(json.dumps(summary, indent=2))
+
+    # Re-raise to keep CI step status correct
+    if fatal_error:
+        raise fatal_error
     return summary
 
 
