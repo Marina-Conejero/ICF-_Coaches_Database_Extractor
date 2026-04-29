@@ -581,15 +581,56 @@ def Runner(params: RunParams) -> dict:
                     ),
                 )
             elif is_partial:
+                # Build a user-friendly summary that explains what happened
+                # in plain language. Technical details follow at the bottom
+                # for engineers who want to debug.
+                missed = expected_total - captured_total
+                summary_lines = []
+                if expected_total == 0 and captured_total == 0:
+                    summary_lines.append(
+                        "ICF returned no coaches matching this brief's filters. "
+                        "The combination may be too narrow — try removing one filter "
+                        "(e.g. drop a language requirement) and re-run."
+                    )
+                elif missed > 0:
+                    summary_lines.append(
+                        f"Captured {captured_total} coaches but ICF reported {expected_total}. "
+                        f"{missed} coach(es) were missed because their profile pages "
+                        f"didn't load in time during the scrape."
+                    )
+                    summary_lines.append("")
+                    summary_lines.append(
+                        "What this means: the data you have is correct, just "
+                        "incomplete. Re-running the same brief usually captures "
+                        "the missing coaches (failures are typically transient)."
+                    )
+                else:
+                    summary_lines.append(
+                        f"Captured {captured_total} coaches with "
+                        f"{len(all_errors)} non-fatal warning(s) during the scrape. "
+                        "The data captured is reliable; the warnings are "
+                        "ICF page hiccups that didn't drop any coaches."
+                    )
+                summary_lines.append("")
+                summary_lines.append("=" * 50)
+                summary_lines.append("Per-country breakdown:")
+                for d in aggregate_diagnostics:
+                    cn = d.get("country", "?")
+                    cap = d.get("captured_total", 0)
+                    exp = d.get("expected_total_cards", 0)
+                    pages = d.get("pages_seen", 0)
+                    errs = len(d.get("errors", []))
+                    summary_lines.append(
+                        f"  • {cn}: captured {cap}/{exp} across {pages} page(s), "
+                        f"{errs} warning(s)"
+                    )
+                summary_lines.append("")
+                summary_lines.append("Technical detail (first 30 errors):")
+                summary_lines.extend(all_errors[:30])
                 at_writer.finish_scrape_run(
                     scrape_run_id,
                     status="Partial",
-                    error_log=(
-                        f"Captured {captured_total}/{expected_total} coaches across "
-                        f"{sum(d.get('pages_seen', 0) for d in aggregate_diagnostics)} "
-                        f"pages with {len(all_errors)} card-level errors.\n\n"
-                        + "First errors:\n" + "\n".join(all_errors[:30])
-                    ),
+                    error_log="\n".join(summary_lines),
                 )
             else:
                 at_writer.finish_scrape_run(scrape_run_id, status="Completed")

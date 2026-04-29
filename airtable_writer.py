@@ -388,15 +388,41 @@ class AirtableWriter:
         country_id = country_info["id"] if country_info else None
         country_code = country_info.get("code") if country_info else None
 
-        icf_creds, other_creds = split_credentials(row.get("Coach_Name") or row.get("Credentials"))
-        # Trust headline first. If the headline didn't mention any ICF
-        # credential and the filter was for exactly one, we know they have
-        # that one — add it. Multi-credential filters are intentionally
-        # ambiguous (we don't know which one), so we don't over-assign.
-        if not icf_creds and applied_credentials and len(applied_credentials) == 1:
+        icf_creds_raw, other_creds = split_credentials(row.get("Coach_Name") or row.get("Credentials"))
+        icf_creds_set = set(icf_creds_raw)
+        # ICF credential level (ACC/PCC/MCC) is mutually exclusive — a coach
+        # has exactly ONE current level, even if their headline lists older
+        # ones from when they progressed up. ACTC is an additive add-on.
+        if applied_credentials and len(applied_credentials) == 1:
+            # Single-credential filter — ICF's filter is authoritative
             single = applied_credentials[0].upper()
-            if single in {"ACC", "PCC", "MCC", "ACTC"}:
-                icf_creds = [single]
+            if single in {"ACC", "PCC", "MCC"}:
+                # Drop any other levels; keep ACTC if mentioned
+                icf_creds_set = {single}
+                if "ACTC" in icf_creds_raw:
+                    icf_creds_set.add("ACTC")
+            elif single == "ACTC":
+                # Filter was ACTC — coach has ACTC plus possibly a level
+                icf_creds_set.add("ACTC")
+        elif applied_credentials and len(applied_credentials) > 1:
+            # Multi-credential filter — coach has at least one of the
+            # filtered levels. If headline mentions multiple, pick the
+            # highest (MCC > PCC > ACC).
+            levels_in_headline = icf_creds_set & {"ACC", "PCC", "MCC"}
+            if levels_in_headline:
+                if "MCC" in levels_in_headline:
+                    chosen = "MCC"
+                elif "PCC" in levels_in_headline:
+                    chosen = "PCC"
+                else:
+                    chosen = "ACC"
+                icf_creds_set = {chosen}
+                if "ACTC" in icf_creds_raw:
+                    icf_creds_set.add("ACTC")
+            # If no level mentioned in headline, leave empty
+            # (we can't disambiguate which of the multi-filter values applies)
+        # No filter info → trust the headline
+        icf_creds = sorted(icf_creds_set)
 
         fields: dict[str, Any] = {
             "Email": email,
