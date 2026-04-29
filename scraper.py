@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Iterable
 
 from selenium import webdriver
+from selenium.common.exceptions import NoSuchElementException
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
@@ -267,56 +268,126 @@ def extract_profile_row(browser: webdriver.Chrome,
     return row
 
 
-def iterate_cards(browser: webdriver.Chrome, wait: WebDriverWait) -> list[list[str]]:
-    """Walk every coach card on the current page, collect rows."""
+def count_total_cards_on_page(browser: webdriver.Chrome) -> int:
+    """How many coach cards are present in the DOM right now."""
+    return len(browser.find_elements(By.XPATH, f"//div[@class='{CARD_CLASS}']"))
+
+
+def iterate_cards(browser: webdriver.Chrome,
+                  wait: WebDriverWait,
+                  page_num: int) -> tuple[list[list[str]], int, list[str]]:
+    """Walk every coach card on the current page, collect rows.
+
+    Returns: (rows, total_cards_on_page, errors).
+    Errors is a list of human-readable strings of cards that failed to
+    extract — can be empty. Caller uses len(rows) vs total_cards to detect
+    silent failures.
+    """
     rows: list[list[str]] = []
-    step = 1
-    while True:
+    errors: list[str] = []
+    total = count_total_cards_on_page(browser)
+    print(f"  page {page_num}: {total} cards visible")
+
+    for step in range(1, total + 1):
         try:
             card = browser.find_element(
                 By.XPATH,
                 f"//div[@class='{CARD_CLASS}'][position()={step}]"
             )
-        except Exception:
-            break
-        try:
             check_input = card.find_element(By.TAG_NAME, "input")
             coach_value = check_input.get_attribute("value")
             row = extract_profile_row(browser, wait, coach_value)
             rows.append(row)
             wait.until(EC.presence_of_element_located((By.ID, CARDS_CONTAINER_ID)))
+        except NoSuchElementException as exc:
+            msg = f"page {page_num}, card {step}/{total}: element not found"
+            errors.append(msg)
+            print(f"    ⚠ {msg}", file=sys.stderr)
         except Exception as exc:
-            print(f"    warning: card {step} failed: {exc}", file=sys.stderr)
-        step += 1
-    return rows
+            msg = f"page {page_num}, card {step}/{total}: {type(exc).__name__}: {str(exc)[:150]}"
+            errors.append(msg)
+            print(f"    ⚠ {msg}", file=sys.stderr)
+
+    print(f"  page {page_num}: captured {len(rows)}/{total} coaches"
+          + (" (with errors)" if errors else ""))
+    return rows, total, errors
+
+
+def discover_total_pages(browser: webdriver.Chrome) -> int:
+    """Read the pagination element to find the maximum page number."""
+    try:
+        links = browser.find_elements(By.CSS_SELECTOR, "a.item[data-value]")
+        page_nums = []
+        for link in links:
+            v = link.get_attribute("data-value")
+            if v and v.isdigit():
+                page_nums.append(int(v))
+        return max(page_nums) if page_nums else 1
+    except Exception:
+        return 1
 
 
 def iterate_pages(browser: webdriver.Chrome,
-                  wait: WebDriverWait) -> Iterable[list[str]]:
-    """Yield rows across every page of search results, paging via 'a.item'."""
-    page = 1
-    while True:
+                  wait: WebDriverWait
+                  ) -> tuple[list[list[str]], dict]:
+    """Walk every result page, returning (all_rows, diagnostics).
+
+    diagnostics = {
+        "pages_seen": int,
+        "expected_total_cards": int,    # sum across all pages
+        "captured_total": int,
+        "errors": list[str],
+    }
+    """
+    all_rows: list[list[str]] = []
+    diagnostics = {
+        "pages_seen": 0,
+        "expected_total_cards": 0,
+        "captured_total": 0,
+        "errors": [],
+    }
+
+    expected_pages = discover_total_pages(browser)
+    print(f"\n  pagination: {expected_pages} page(s) detected")
+
+    for page in range(1, expected_pages + 1):
         if page > 1:
             try:
-                current = browser.find_element(By.CSS_SELECTOR, "a.item.active")
-                page_num = int(current.get_attribute("data-value"))
                 next_link = browser.find_element(
                     By.XPATH,
-                    f"//a[@class='item'][@data-value={page_num + 1}]"
+                    f"//a[@class='item'][@data-value={page}]"
                 )
-                if "disabled" in next_link.get_attribute("class"):
-                    return
+                if "disabled" in (next_link.get_attribute("class") or ""):
+                    diagnostics["errors"].append(
+                        f"page {page}: next-page link disabled, stopping"
+                    )
+                    break
                 next_link.click()
                 time.sleep(2)
                 wait.until(EC.presence_of_element_located((By.ID, CARDS_CONTAINER_ID)))
-            except Exception:
-                return
-        rows = iterate_cards(browser, wait)
-        for r in rows:
-            yield r
-        if not rows:
-            return
-        page += 1
+            except NoSuchElementException:
+                diagnostics["errors"].append(
+                    f"page {page}: navigation link not found"
+                )
+                break
+            except Exception as exc:
+                diagnostics["errors"].append(
+                    f"page {page}: navigation error: {type(exc).__name__}: {exc}"
+                )
+                break
+
+        page_rows, page_total, page_errors = iterate_cards(browser, wait, page)
+        diagnostics["pages_seen"] += 1
+        diagnostics["expected_total_cards"] += page_total
+        diagnostics["captured_total"] += len(page_rows)
+        diagnostics["errors"].extend(page_errors)
+        all_rows.extend(page_rows)
+
+        if page_total == 0:
+            # No more cards — done
+            break
+
+    return all_rows, diagnostics
 
 
 # ---------------------------------------------------------------------------
@@ -345,8 +416,8 @@ class RunParams:
 
 def run_country(browser: webdriver.Chrome,
                 country: CountryParams,
-                params: RunParams) -> Iterable[list[str]]:
-    """Run a single-country scrape; yield raw rows."""
+                params: RunParams) -> tuple[list[list[str]], dict]:
+    """Run a single-country scrape. Returns (rows, diagnostics)."""
     print(f"\n--- {country.name} ---")
     browser.get(ICF_SEARCH_URL)
     wait = WebDriverWait(browser, params.page_load_wait)
@@ -363,9 +434,12 @@ def run_country(browser: webdriver.Chrome,
         wait.until(EC.presence_of_element_located((By.ID, CARDS_CONTAINER_ID)))
     except Exception:
         print(f"  no results for {country.name}")
-        return
+        return [], {
+            "pages_seen": 0, "expected_total_cards": 0,
+            "captured_total": 0, "errors": ["no results card container appeared"],
+        }
 
-    yield from iterate_pages(browser, wait)
+    return iterate_pages(browser, wait)
 
 
 def Runner(params: RunParams) -> dict:
@@ -409,6 +483,7 @@ def Runner(params: RunParams) -> dict:
     airtable_skipped = 0
     scraped_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     fatal_error: Exception | None = None
+    aggregate_diagnostics: list[dict] = []  # one per country
 
     headers_to_dict_keys = OUTPUT_HEADERS  # rows align to this order
 
@@ -420,7 +495,10 @@ def Runner(params: RunParams) -> dict:
             for country in params.countries:
                 browser = init_browser(headless=params.headless)
                 try:
-                    for row in run_country(browser, country, params):
+                    rows, diag = run_country(browser, country, params)
+                    diag["country"] = country.name
+                    aggregate_diagnostics.append(diag)
+                    for row in rows:
                         while len(row) < len(OUTPUT_HEADERS) - 3:
                             row.append("")
                         row = list(row[: len(OUTPUT_HEADERS) - 3]) + [
@@ -457,6 +535,22 @@ def Runner(params: RunParams) -> dict:
         print(f"\n*** Scraper aborted: {exc}", file=sys.stderr)
 
     duration = time.time() - started
+
+    # Sanity check — did we capture every coach the page advertised?
+    expected_total = sum(d.get("expected_total_cards", 0) for d in aggregate_diagnostics)
+    captured_total = sum(d.get("captured_total", 0) for d in aggregate_diagnostics)
+    all_errors: list[str] = []
+    for d in aggregate_diagnostics:
+        country_name = d.get("country", "?")
+        for e in d.get("errors", []):
+            all_errors.append(f"[{country_name}] {e}")
+
+    is_partial = (
+        (expected_total > 0 and captured_total < expected_total)
+        or len(all_errors) > 0
+        or total_rows == 0
+    )
+
     summary = {
         "run_label": params.run_label,
         "total_rows": total_rows,
@@ -464,7 +558,11 @@ def Runner(params: RunParams) -> dict:
         "duration_seconds": round(duration, 1),
         "output_path": params.output_path,
         "fatal_error": str(fatal_error) if fatal_error else None,
+        "expected_total_cards": expected_total,
+        "captured_total": captured_total,
+        "error_count": len(all_errors),
     }
+
     if at_writer:
         summary["airtable"] = {
             "scrape_run_id": scrape_run_id,
@@ -477,13 +575,21 @@ def Runner(params: RunParams) -> dict:
                 at_writer.finish_scrape_run(
                     scrape_run_id,
                     status="Failed",
-                    error_log=f"Scraper aborted after {total_rows} rows: {fatal_error}",
+                    error_log=(
+                        f"Scraper aborted after {total_rows} rows: {fatal_error}\n\n"
+                        + "Diagnostics:\n" + "\n".join(all_errors[:50])
+                    ),
                 )
-            elif total_rows == 0:
+            elif is_partial:
                 at_writer.finish_scrape_run(
                     scrape_run_id,
                     status="Partial",
-                    error_log="Scrape completed but returned 0 coaches — verify filters",
+                    error_log=(
+                        f"Captured {captured_total}/{expected_total} coaches across "
+                        f"{sum(d.get('pages_seen', 0) for d in aggregate_diagnostics)} "
+                        f"pages with {len(all_errors)} card-level errors.\n\n"
+                        + "First errors:\n" + "\n".join(all_errors[:30])
+                    ),
                 )
             else:
                 at_writer.finish_scrape_run(scrape_run_id, status="Completed")
