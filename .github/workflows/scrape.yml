@@ -35,8 +35,14 @@ on:
         description: 'JSON array of org types (Global/Multi-national, Nonprofit/NGO)'
         required: false
         default: '[]'
-  schedule:
-    - cron: '0 2 1 1,4,7,10 *'
+  # Quarterly auto-refresh disabled until we confirm with Caitlin/Sama how
+  # often they actually want re-scrapes. Re-enable by uncommenting.
+  # The cron runs at 02:00 UTC on the 1st of January, April, July, October.
+  # Currently it would fail anyway because no countries/credentials are
+  # passed in the cron payload — needs a default-params block in `prepare`
+  # before this is safe to fire.
+  # schedule:
+  #   - cron: '0 2 1 1,4,7,10 *'
 
 jobs:
   # ---- Job 1: build the matrix from the trigger payload --------------------
