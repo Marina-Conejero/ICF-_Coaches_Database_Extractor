@@ -352,6 +352,7 @@ class AirtableWriter:
             "Can Provide": split_multiselect(row.get("Can Provide")) or None,
             "Source": "ICF Scrape",
             "Scrape Run": [scrape_run_id],
+            "Last Scraped At": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
         }
         if country_id:
             fields["Country"] = [country_id]
@@ -372,6 +373,21 @@ class AirtableWriter:
             ):
                 if k in preserved:
                     fields.pop(k, None)
+
+            # Scrape Run is APPENDED, not replaced — preserves historical
+            # provenance across repeat scrapes of the same coach.
+            existing_runs = list(preserved.get("Scrape Run") or [])
+            if scrape_run_id and scrape_run_id not in existing_runs:
+                fields["Scrape Run"] = existing_runs + [scrape_run_id]
+            else:
+                fields.pop("Scrape Run", None)  # already linked, no-op
+
+            # Credentials accumulate too — never strip what was there before.
+            existing_creds = list(preserved.get("Credentials") or [])
+            if "Credentials" in fields:
+                merged = sorted(set(existing_creds) | set(fields["Credentials"]))
+                fields["Credentials"] = merged
+
             r = self.session.patch(url, json={"fields": fields, "typecast": True})
             if r.status_code >= 400:
                 print(f"WARN: update failed for {email}: {r.text}", file=sys.stderr)

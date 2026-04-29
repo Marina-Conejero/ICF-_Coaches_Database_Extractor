@@ -88,7 +88,10 @@ jobs:
     timeout-minutes: 350    # 5h50m — under the 6h GitHub cap
     strategy:
       fail-fast: false
-      max-parallel: 3        # ICF is rate-sensitive; keep concurrency conservative
+      # Stay under Airtable's 5-req/sec-per-base rate limit. Each scraper
+      # makes ~2 requests per coach (find + upsert) at 4 req/sec, so 2 parallel
+      # workers ≈ 8 reqs/sec is borderline. Capping at 2 gives a small margin.
+      max-parallel: 2
       matrix:
         country: ${{ fromJson(needs.prepare.outputs.countries) }}
     steps:
