@@ -209,7 +209,7 @@ class AirtableWriter:
                 "Client Types Filter": ", ".join(params.get("coached_organizations", [])) or None,
                 "Started At": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                 "Status": "Running",
-                "GitHub_Run_URL": params.get("github_run_url"),
+                "GitHub Run URL": params.get("github_run_url"),
             }
         }
         body["fields"] = {k: v for k, v in body["fields"].items() if v is not None}

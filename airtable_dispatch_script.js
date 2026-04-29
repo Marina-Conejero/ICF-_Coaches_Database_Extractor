@@ -24,13 +24,27 @@
 
 const config = input.config();
 
+// Helper — Airtable input.config() returns arrays for linked-record and
+// multi-select fields, and strings for text fields. Coerce both to a clean
+// trimmed string array.
+function toArray(v) {
+    if (v === null || v === undefined || v === "") return [];
+    if (Array.isArray(v)) {
+        return v
+            .map(x => (typeof x === "object" && x !== null) ? (x.name || x.value || "") : x)
+            .map(s => String(s).trim())
+            .filter(Boolean);
+    }
+    return String(v).split(",").map(s => s.trim()).filter(Boolean);
+}
+
 // ---- 1. Read the trigger record's fields ----
 const briefId      = config.briefId;
 const briefName    = config.briefName || `brief_${Date.now()}`;
-const countryNames = (config.countryNames || "").split(",").map(s => s.trim()).filter(Boolean);
-const credentials  = (config.credentials || "").split(",").map(s => s.trim()).filter(Boolean);
-const languages    = (config.languages || "").split(",").map(s => s.trim()).filter(Boolean);
-const clientTypes  = (config.clientTypes || "").split(",").map(s => s.trim()).filter(Boolean);
+const countryNames = toArray(config.countryNames);
+const credentials  = toArray(config.credentials);
+const languages    = toArray(config.languages);
+const clientTypes  = toArray(config.clientTypes);
 const submitter    = config.submitter || "Airtable Form";
 
 if (countryNames.length === 0) {
