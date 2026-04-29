@@ -49,9 +49,11 @@ const response = await fetch(
 );
 
 // 2. Update the Push Control record so Caitlin can see what happened
+//    AND reset the Trigger Push checkbox so it can be fired again.
 const controlTable = base.getTable("Push Control");
 const isOk = response.status === 204;
 await controlTable.updateRecordAsync(controlRecordId, {
+    "Trigger Push": false,
     "Last Triggered At": new Date().toISOString(),
     "Last Result": isOk
         ? "✓ Push started — coaches will be processed in the background. Watch Slack for the summary."

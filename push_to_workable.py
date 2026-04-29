@@ -285,8 +285,9 @@ def append_coach_to_briefs_pushed(s: requests.Session, coach_id: str,
 def process_coach(coach: dict,
                   airtable: requests.Session,
                   workable: requests.Session,
-                  lookup: dict) -> str:
-    """Returns one of: pushed, duplicate, error."""
+                  lookup: dict) -> tuple[str, str]:
+    """Returns (status, reason). status is one of: pushed, duplicate, error.
+    reason is a human-readable explanation (used for Slack), empty for non-errors."""
     coach_id = coach["id"]
     f = coach["fields"]
     email = (f.get("Email") or "").strip().lower()
@@ -298,7 +299,7 @@ def process_coach(coach: dict,
         })
         write_sync_log(airtable, coach_id, "Push", "Error",
                        error="Invalid email")
-        return "error"
+        return "error", "Invalid or missing email"
 
     # Respect Do Not Contact
     if f.get("Do Not Contact"):
@@ -309,7 +310,7 @@ def process_coach(coach: dict,
         })
         write_sync_log(airtable, coach_id, "Skip Duplicate", "Error",
                        error="Do Not Contact")
-        return "error"
+        return "error", "Do Not Contact flag set"
 
     # Already flagged In Workable + has ID — clear and skip
     if f.get("In Workable") and f.get("Workable ID"):
@@ -319,18 +320,19 @@ def process_coach(coach: dict,
         })
         write_sync_log(airtable, coach_id, "Skip Duplicate", "Duplicate Skipped",
                        body="Already flagged In Workable")
-        return "duplicate"
+        return "duplicate", ""
 
     # Workable email lookup — defensive dedup
     try:
         existing = workable_find_by_email(workable, email)
     except Exception as exc:
+        reason = f"Lookup failed: {exc}"
         airtable_update(airtable, COACHES_TABLE, coach_id, {
             "Push Status": "Error",
-            "Push Error Details": f"Lookup failed: {exc}",
+            "Push Error Details": reason,
         })
         write_sync_log(airtable, coach_id, "Push", "Error", error=str(exc))
-        return "error"
+        return "error", reason
 
     if existing:
         airtable_update(airtable, COACHES_TABLE, coach_id, {
@@ -344,30 +346,32 @@ def process_coach(coach: dict,
         })
         write_sync_log(airtable, coach_id, "Skip Duplicate", "Duplicate Skipped",
                        code=200, body=f"Existing Workable id {existing.get('id')}")
-        return "duplicate"
+        return "duplicate", ""
 
     # Build & POST
     payload = coach_to_workable_payload(coach, lookup)
     code, body = workable_create_candidate(workable, JOB_SHORTCODE, payload)
 
     if code >= 400:
+        reason = f"HTTP {code}: {str(body)[:300]}"
         airtable_update(airtable, COACHES_TABLE, coach_id, {
             "Push Status": "Error",
             "Push Error Details": f"HTTP {code}: {str(body)[:500]}",
         })
         write_sync_log(airtable, coach_id, "Push", "Error",
                        code=code, body=str(body), error=f"HTTP {code}")
-        return "error"
+        return "error", reason
 
     new = body["candidate"] if isinstance(body, dict) and "candidate" in body else None
     if not new or not new.get("id"):
+        reason = "Workable accepted but returned no id"
         airtable_update(airtable, COACHES_TABLE, coach_id, {
             "Push Status": "Error",
-            "Push Error Details": "Workable accepted but returned no id",
+            "Push Error Details": reason,
         })
         write_sync_log(airtable, coach_id, "Push", "Error",
                        code=code, body=str(body), error="No candidate id")
-        return "error"
+        return "error", reason
 
     workable_id = str(new["id"])
     airtable_update(airtable, COACHES_TABLE, coach_id, {
@@ -390,7 +394,7 @@ def process_coach(coach: dict,
 
     write_sync_log(airtable, coach_id, "Push", "Success",
                    code=code, body=f"Workable id {workable_id}")
-    return "pushed"
+    return "pushed", ""
 
 
 # ---------------------------------------------------------------------------
@@ -472,7 +476,7 @@ def main():
     for i, coach in enumerate(coaches, 1):
         email = (coach["fields"].get("Email") or "").strip().lower() or "?"
         try:
-            result = process_coach(coach, airtable, workable, lookup)
+            result, reason = process_coach(coach, airtable, workable, lookup)
         except Exception as exc:
             print(f"  [{i}/{len(coaches)}] {email}: ERROR ({exc})", file=sys.stderr)
             stats["error"] += 1
@@ -481,16 +485,10 @@ def main():
 
         stats[result] += 1
         symbol = {"pushed": "✓", "duplicate": "↻", "error": "✗"}[result]
-        print(f"  [{i}/{len(coaches)}] {email}: {symbol} {result}")
+        print(f"  [{i}/{len(coaches)}] {email}: {symbol} {result}"
+              + (f" — {reason}" if reason else ""))
         if result == "error":
-            # Re-fetch the coach to get the error reason we just wrote
-            try:
-                refreshed = airtable_get(airtable, COACHES_TABLE, coach["id"],
-                                         fields=["Push Error Details"])
-                reason = refreshed["fields"].get("Push Error Details", "") if refreshed else ""
-            except Exception:
-                reason = ""
-            failures.append({"email": email, "reason": reason})
+            failures.append({"email": email, "reason": reason or "(no detail)"})
 
         time.sleep(AIRTABLE_RATE_SLEEP)
 
