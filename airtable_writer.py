@@ -70,16 +70,42 @@ def split_name(full: str | None) -> tuple[str | None, str | None]:
 
 
 def parse_location(loc: str | None) -> tuple[str | None, str | None]:
-    """'Munich, GERMANY' → ('Munich', 'GERMANY'); 'Toronto, ON CANADA' → ('Toronto', 'CANADA')."""
-    if not loc:
-        return None, None
-    parts = [p.strip() for p in loc.split(",")]
-    if len(parts) == 1:
-        return None, parts[0]
-    city = parts[0]
-    tail = parts[-1]
-    country = tail.split()[-1] if " " in tail else tail
+    """Backwards-compat wrapper — returns (city, country) from a Location."""
+    city, _state, country = parse_location_v3(loc)
     return city, country
+
+
+def parse_location_v3(loc: str | None) -> tuple[str | None, str | None, str | None]:
+    """Return (city, state_province, country) from a Location string.
+
+    Handles ICF-style strings like:
+      'Munich, GERMANY'                → ('Munich',  None,         'GERMANY')
+      'Toronto, ON CANADA'             → ('Toronto', 'ON',         'CANADA')
+      'Glenageary, Dublin IRELAND'     → ('Glenageary','Dublin',   'IRELAND')
+      'Lismore, Co Waterford IRELAND'  → ('Lismore', 'Co Waterford','IRELAND')
+    """
+    if not loc:
+        return None, None, None
+    s = loc.strip()
+    parts = [p.strip() for p in s.split(",")]
+    if not parts:
+        return None, None, None
+    if len(parts) == 1:
+        return None, None, parts[0] or None
+    city = parts[0] or None
+    if len(parts) >= 3:
+        state = parts[1] or None
+        country = parts[-1] or None
+    else:
+        last = parts[-1]
+        words = last.split()
+        if len(words) <= 1:
+            state = None
+            country = last or None
+        else:
+            state = " ".join(words[:-1])
+            country = words[-1]
+    return city, state, country
 
 
 def split_credentials(raw: str | None) -> tuple[list[str], list[str]]:
@@ -317,7 +343,7 @@ class AirtableWriter:
             return "skipped"
 
         first, last = split_name(row.get("Coach_Name"))
-        city, country_str = parse_location(row.get("Location"))
+        city, state, country_str = parse_location_v3(row.get("Location"))
         if not country_str:
             country_str = row.get("Country")  # fallback to scrape param
         country_info = self.country_info(country_str)
@@ -338,6 +364,7 @@ class AirtableWriter:
             "Phone": normalise_phone(row.get("Phone"), country_code),
             "Website": (row.get("Website") or "").strip() or None,
             "City": city,
+            "State Province": state,
             "Headline": row.get("Coach_Name") or None,
             "Credentials": icf_creds or None,
             "Other Certifications": ", ".join(other_creds) if other_creds else None,
