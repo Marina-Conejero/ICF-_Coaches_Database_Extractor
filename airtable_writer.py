@@ -237,12 +237,20 @@ class AirtableWriter:
     # ----- public API -----
 
     def start_scrape_run(self, run_label: str, params: dict) -> str:
-        """Create a Scrape Run record. Return its id."""
+        """Create a Scrape Run record. Return its id.
+
+        If params['brief_id'] is set, also links the Scrape Run to that
+        Search Brief — Airtable mirrors this on the Brief's Scrape Run field
+        automatically, so Brief → Coaches Matched can be populated by the
+        Brief Link Coaches Automation when the run completes.
+        """
         country_ids = []
         for country in params.get("countries", []):
             cid = self.country_id_for(country.get("name"))
             if cid:
                 country_ids.append(cid)
+
+        brief_id = params.get("brief_id")
         body = {
             "fields": {
                 "Run Label": run_label,
@@ -254,6 +262,7 @@ class AirtableWriter:
                 "Started At": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
                 "Status": "Running",
                 "GitHub Run URL": params.get("github_run_url"),
+                "Search Briefs": [brief_id] if brief_id else None,
             }
         }
         body["fields"] = {k: v for k, v in body["fields"].items() if v is not None}

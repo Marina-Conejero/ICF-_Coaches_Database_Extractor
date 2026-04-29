@@ -332,6 +332,7 @@ class RunParams:
     output_path: str = "raw_data.csv"
     headless: bool = True
     page_load_wait: int = 30
+    brief_id: str = ""    # Search Brief record id — set when scrape was triggered by a brief
 
 
 def run_country(browser: webdriver.Chrome,
@@ -382,6 +383,7 @@ def Runner(params: RunParams) -> dict:
                     "coached_organizations": params.coached_organizations,
                     "github_run_url": os.environ.get("GITHUB_RUN_URL"),
                     "triggered_by": os.environ.get("GITHUB_TRIGGERED_BY", "GitHub Actions"),
+                    "brief_id": params.brief_id or None,
                 },
             )
             print(f"Airtable Scrape Run created: {scrape_run_id}")
@@ -508,6 +510,7 @@ def parse_params_file(path: str) -> RunParams:
         output_path=raw.get("output_path", f"{raw.get('run_label', 'scrape')}.csv"),
         headless=raw.get("headless", True),
         page_load_wait=raw.get("page_load_wait", 30),
+        brief_id=raw.get("brief_id", ""),
     )
 
 
