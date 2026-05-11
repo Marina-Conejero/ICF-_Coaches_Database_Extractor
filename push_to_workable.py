@@ -335,6 +335,9 @@ def process_coach(coach: dict,
         return "error", reason
 
     if existing:
+        # Capture every signal Caitlin needs to make the manual review call:
+        # which stage they're at, whether they were disqualified previously,
+        # and a clickable link straight to the Workable profile.
         airtable_update(airtable, COACHES_TABLE, coach_id, {
             "Marked for Push": False,
             "In Workable": True,
@@ -342,10 +345,14 @@ def process_coach(coach: dict,
             "Workable Stage": existing.get("stage"),
             "Workable Stage Kind": existing.get("stage_kind"),
             "Workable Profile URL": existing.get("profile_url"),
+            "Workable Disqualified": bool(existing.get("disqualified", False)),
+            "Workable Disqualification Reason": existing.get("disqualification_reason"),
             "Push Status": "Flagged for Review",
         })
+        disq_note = " (DISQUALIFIED)" if existing.get("disqualified") else ""
         write_sync_log(airtable, coach_id, "Skip Duplicate", "Duplicate Skipped",
-                       code=200, body=f"Existing Workable id {existing.get('id')}")
+                       code=200, body=f"Existing Workable id {existing.get('id')} "
+                                      f"at stage '{existing.get('stage')}'"+ disq_note)
         return "duplicate", ""
 
     # Build & POST
