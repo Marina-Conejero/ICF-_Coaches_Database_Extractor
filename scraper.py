@@ -54,12 +54,45 @@ CREDENTIAL_IDS = {
     "ACC": "credential-acc",
     "PCC": "credential-pcc",
     "MCC": "credential-mcc",
+    # Note: ACTC is NOT a search-time filter on the ICF directory. It only
+    # appears on individual coach profiles. When ACTC is requested as a brief
+    # filter, the scraper still runs against ACC/PCC/MCC and we filter for
+    # ACTC presence post-scrape (in airtable_writer.link_brief_matches).
 }
 
 COACHED_ORG_IDS = {
     "Global/Multi-national": "coached-global",
     "Nonprofit/NGO": "coached-non-profit",
 }
+
+# Inline Semantic-UI dropdowns (different DOM pattern from the language /
+# location modals). Captured from the live ICF directory May 2026.
+TYPE_OF_CLIENT_DROPDOWN_ID = "type-of-client-dropdown"
+TYPE_OF_CLIENT_VALUES = {
+    # Form-friendly name → data-value used by Semantic UI's dropdown menu
+    "Organizational": "Organization",
+    "Personal": "Individual",
+}
+
+INDUSTRY_SECTOR_DROPDOWN_ID = "industry-sector-dropdown"
+INDUSTRY_SECTOR_VALUES = {
+    "Communications, Entertainment, and Media":   "aa838cbf-1d56-40a1-8563-047c05f7105f",
+    "Education":                                  "a6c708de-34ab-4622-988f-895aff81cc97",
+    "Energy and Utilities":                       "c427d281-4c16-4730-9ffc-5f2ca556dcec",
+    "Government and Public":                      "d0c88526-147e-4555-8cef-176a4361eea7",
+    "Health, Pharmaceutical and Science":         "463183c4-7280-4674-b6af-30b3f1bb58ca",
+    "Hospitality and Leisure":                    "c5f322d2-1008-4dc6-aa0d-c18b7db6b1ac",
+    "Manufacturing, Engineering and Construction": "f45f7162-9f49-4b68-9b97-881702f46fba",
+    "Professional and Financial Services":        "1b6c2344-7256-464b-96f9-4b428841e60d",
+    "Retail and Consumer":                        "fbb8838a-89d4-4b2c-83a7-bed1e43d5d9c",
+    "Technology":                                 "4c683b7e-178c-4859-9d7b-ebf5dcebebca",
+    "Transportation":                             "3042d0e3-389e-488f-886f-51484a1dde79",
+}
+
+# Gender dropdown has no DOM id, only a placeholder. We find it by its
+# `.default.text` "Gender". Selection values match the visible text.
+GENDER_DROPDOWN_PLACEHOLDER = "Gender"
+GENDER_VALUES = {"Male": "Male", "Female": "Female"}
 
 MODAL_BUTTON_IDS = {
     "language": "add-fluent-language",
@@ -166,6 +199,126 @@ def apply_coached_org_filters(browser: webdriver.Chrome,
             print(f"  ✓ coached-org filter: {ct}")
         else:
             print(f"  warning: unknown coached-org {ct!r}", file=sys.stderr)
+
+
+def apply_inline_dropdown_by_id(browser: webdriver.Chrome,
+                                dropdown_id: str,
+                                value: str,
+                                label_for_logs: str = "") -> None:
+    """Select an item in a Semantic UI dropdown identified by `dropdown_id`.
+
+    These are inline `<div class="ui dropdown">` widgets (Type of Client,
+    Industry Sectors, Sort, etc) — different from the language/location modals.
+    Selection pattern: click the wrapper to open, click the matching menu
+    item by `data-value`, dropdown auto-closes.
+    """
+    if not value:
+        return
+    label = label_for_logs or dropdown_id
+    try:
+        script = (
+            "const d = document.getElementById(arguments[0]);"
+            "if (!d) return 'no-dropdown';"
+            "d.click();"
+            "const item = d.querySelector(`.menu .item[data-value=\"${arguments[1]}\"]`);"
+            "if (!item) return 'no-item';"
+            "item.click();"
+            "return 'ok';"
+        )
+        result = browser.execute_script(script, dropdown_id, value)
+        if result == "ok":
+            print(f"  ✓ {label}: {value}")
+        elif result == "no-dropdown":
+            print(f"  warning: dropdown #{dropdown_id} not found", file=sys.stderr)
+        else:
+            print(f"  warning: {label} option {value!r} not found in dropdown", file=sys.stderr)
+        time.sleep(0.6)
+    except Exception as exc:
+        print(f"  warning: could not set {label}={value!r}: {exc}", file=sys.stderr)
+
+
+def apply_inline_dropdown_by_placeholder(browser: webdriver.Chrome,
+                                         placeholder: str,
+                                         value: str,
+                                         label_for_logs: str = "") -> None:
+    """Select an item in a Semantic UI dropdown identified by its placeholder text.
+
+    Used for dropdowns without a stable DOM id — e.g. the Gender dropdown,
+    which only exposes `.default.text` = "Gender".
+    """
+    if not value:
+        return
+    label = label_for_logs or placeholder
+    try:
+        script = (
+            "const dropdowns = document.querySelectorAll('.ui.dropdown');"
+            "const d = Array.from(dropdowns).find(x => "
+            "  (x.querySelector('.default.text')?.innerText || '').trim() === arguments[0]"
+            ");"
+            "if (!d) return 'no-dropdown';"
+            "d.click();"
+            "const item = d.querySelector(`.menu .item[data-value=\"${arguments[1]}\"]`);"
+            "if (!item) return 'no-item';"
+            "item.click();"
+            "return 'ok';"
+        )
+        result = browser.execute_script(script, placeholder, value)
+        if result == "ok":
+            print(f"  ✓ {label}: {value}")
+        elif result == "no-dropdown":
+            print(f"  warning: dropdown with placeholder {placeholder!r} not found", file=sys.stderr)
+        else:
+            print(f"  warning: {label} option {value!r} not found", file=sys.stderr)
+        time.sleep(0.6)
+    except Exception as exc:
+        print(f"  warning: could not set {label}={value!r}: {exc}", file=sys.stderr)
+
+
+def apply_type_of_client_filter(browser: webdriver.Chrome,
+                                type_of_client: str) -> None:
+    """Set the Type of Client dropdown (Organizational/Personal).
+
+    'Both', 'Any', or blank → no filter applied (returns everyone). ICF's
+    dropdown doesn't have a 'Both' option natively; leaving the dropdown
+    unset has the same effect.
+    """
+    if not type_of_client or type_of_client.lower() in {"both", "any", "all", "either", "unspecified"}:
+        return
+    mapped = TYPE_OF_CLIENT_VALUES.get(type_of_client)
+    if not mapped:
+        print(f"  warning: unknown Type of Client {type_of_client!r}", file=sys.stderr)
+        return
+    apply_inline_dropdown_by_id(browser, TYPE_OF_CLIENT_DROPDOWN_ID, mapped,
+                                "type-of-client")
+
+
+def apply_industry_sectors_filter(browser: webdriver.Chrome,
+                                  sectors: list[str]) -> None:
+    """Pick one or more industry sectors from the Industry Sectors dropdown.
+
+    The dropdown is a Semantic UI single-select that can be re-opened to add
+    additional sectors (each click adds the value as a chip). We loop through
+    every requested sector, opening the dropdown each time.
+    """
+    for sector in sectors or []:
+        guid = INDUSTRY_SECTOR_VALUES.get(sector)
+        if not guid:
+            print(f"  warning: unknown Industry Sector {sector!r}", file=sys.stderr)
+            continue
+        apply_inline_dropdown_by_id(browser, INDUSTRY_SECTOR_DROPDOWN_ID, guid,
+                                    f"industry: {sector}")
+
+
+def apply_gender_filter(browser: webdriver.Chrome, gender: str) -> None:
+    """Set the Gender dropdown (Male/Female). 'Any' is a no-op."""
+    if not gender or gender.lower() in {"any", "all", "either", "unspecified"}:
+        return
+    mapped = GENDER_VALUES.get(gender.capitalize())
+    if not mapped:
+        print(f"  warning: unknown Gender {gender!r}", file=sys.stderr)
+        return
+    apply_inline_dropdown_by_placeholder(browser, GENDER_DROPDOWN_PLACEHOLDER,
+                                         mapped, "gender")
 
 
 def apply_modal_filter(browser: webdriver.Chrome, kind: str,
@@ -404,9 +557,12 @@ class CountryParams:
 @dataclass
 class RunParams:
     countries: list[CountryParams]
-    credentials: list[str] = field(default_factory=list)        # ['ACC','PCC']
+    credentials: list[str] = field(default_factory=list)        # ['ACC','PCC','ACTC']
     languages: list[str] = field(default_factory=list)          # ['English','German']
     coached_organizations: list[str] = field(default_factory=list)  # ['Global/Multi-national']
+    type_of_client: str = ""                # 'Organizational' or 'Personal'
+    industry_sectors: list[str] = field(default_factory=list)   # ['Professional and Financial Services', ...]
+    gender: str = ""                        # 'Male', 'Female', or '' (Any)
     run_label: str = "scrape"
     output_path: str = "raw_data.csv"
     headless: bool = True
@@ -424,8 +580,16 @@ def run_country(browser: webdriver.Chrome,
     wait.until(EC.presence_of_element_located((By.ID, "credential-acc")))
     wait.until(EC.presence_of_element_located((By.ID, "add-location")))
 
-    apply_credential_filters(browser, params.credentials)
+    # ACTC isn't a search-time filter — drop it from the credentials list
+    # we send to the ICF UI; post-scrape ACTC filtering happens in the
+    # airtable_writer Brief-linking step.
+    scrape_creds = [c for c in (params.credentials or []) if c.upper() != "ACTC"]
+
+    apply_credential_filters(browser, scrape_creds)
     apply_coached_org_filters(browser, params.coached_organizations)
+    apply_type_of_client_filter(browser, params.type_of_client)
+    apply_industry_sectors_filter(browser, params.industry_sectors)
+    apply_gender_filter(browser, params.gender)
     apply_modal_filter(browser, "location", [country.name])
     apply_modal_filter(browser, "language", params.languages)
 
@@ -463,6 +627,9 @@ def Runner(params: RunParams) -> dict:
                     "credentials": params.credentials,
                     "languages": params.languages,
                     "coached_organizations": params.coached_organizations,
+                    "type_of_client": params.type_of_client,
+                    "industry_sectors": params.industry_sectors,
+                    "gender": params.gender,
                     "github_run_url": os.environ.get("GITHUB_RUN_URL"),
                     "triggered_by": os.environ.get("GITHUB_TRIGGERED_BY", "GitHub Actions"),
                     "brief_id": params.brief_id or None,
@@ -633,6 +800,9 @@ def parse_params_file(path: str) -> RunParams:
         credentials=raw.get("credentials", []),
         languages=raw.get("languages", []),
         coached_organizations=raw.get("coached_organizations", []),
+        type_of_client=raw.get("type_of_client", ""),
+        industry_sectors=raw.get("industry_sectors", []),
+        gender=raw.get("gender", ""),
         run_label=raw.get("run_label", "scrape"),
         output_path=raw.get("output_path", f"{raw.get('run_label', 'scrape')}.csv"),
         headless=raw.get("headless", True),

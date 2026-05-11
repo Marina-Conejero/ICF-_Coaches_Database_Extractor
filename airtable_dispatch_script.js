@@ -9,13 +9,16 @@
 //   2. Add an action: "Run a script".
 //   3. Paste this whole file in.
 //   4. Configure input variables (left sidebar in script editor):
-//      - briefId (record id)        → from the trigger record
-//      - briefName (text)           → field "Brief Name"
-//      - countryNames (text)        → field "Countries" (rollup of Country Name)
-//      - credentials (text)         → field "Credentials" (multi-select as csv)
-//      - languages (text)           → field "Languages"
-//      - clientTypes (text)         → field "Client Types"
-//      - submitter (text)           → field "Submitter"
+//      - briefId (record id)            → from the trigger record
+//      - briefName (text)               → field "Brief Name"
+//      - countryNames (text)            → field "Countries" (rollup of Country Name)
+//      - credentials (text)             → field "Credentials" (multi-select as csv)
+//      - languages (text)               → field "Languages"
+//      - coachedOrganizations (text)    → field "Coached Organizations"
+//      - typeOfClient (text)            → field "Type of Client" (single-select)
+//      - industrySectors (text)         → field "Industry Sectors" (multi-select)
+//      - gender (text)                  → field "Gender" (single-select)
+//      - submitter (text)               → field "Submitter"
 //   5. Replace GITHUB_OWNER, GITHUB_REPO, and GITHUB_PAT below.
 //      (Future: move PAT to a secret env var when Airtable supports it.)
 //
@@ -39,13 +42,16 @@ function toArray(v) {
 }
 
 // ---- 1. Read the trigger record's fields ----
-const briefId      = config.briefId;
-const briefName    = config.briefName || `brief_${Date.now()}`;
-const countryNames = toArray(config.countryNames);
-const credentials  = toArray(config.credentials);
-const languages    = toArray(config.languages);
-const clientTypes  = toArray(config.clientTypes);
-const submitter    = config.submitter || "Airtable Form";
+const briefId              = config.briefId;
+const briefName            = config.briefName || `brief_${Date.now()}`;
+const countryNames         = toArray(config.countryNames);
+const credentials          = toArray(config.credentials);
+const languages            = toArray(config.languages);
+const coachedOrganizations = toArray(config.coachedOrganizations);
+const industrySectors      = toArray(config.industrySectors);
+const typeOfClient         = (config.typeOfClient || "").toString().trim();
+const gender               = (config.gender || "").toString().trim();
+const submitter            = config.submitter || "Airtable Form";
 
 if (countryNames.length === 0) {
     console.log("No countries on the brief — skipping dispatch.");
@@ -81,7 +87,10 @@ const payload = {
         countries: countryPayload,
         credentials: credentials.length ? credentials : ["ACC", "PCC", "MCC"],
         languages: languages,
-        coached_organizations: clientTypes
+        coached_organizations: coachedOrganizations,
+        type_of_client: typeOfClient,
+        industry_sectors: industrySectors,
+        gender: gender
     }
 };
 

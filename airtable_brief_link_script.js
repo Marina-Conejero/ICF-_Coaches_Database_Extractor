@@ -37,18 +37,45 @@ if (briefLinks.length === 0) {
 }
 
 // 2. For each brief, accumulate coaches and rebuild the summary.
+const coachesTable = base.getTable("Coaches");
+
 for (const briefRef of briefLinks) {
     const brief = await briefsTable.selectRecordAsync(briefRef.id, {
-        fields: ["Brief Name", "Coaches Matched", "Scrape Run", "Status"]
+        fields: ["Brief Name", "Coaches Matched", "Scrape Run", "Status",
+                 "Credentials"]
     });
     if (!brief) continue;
 
-    // ---- 2a. Accumulate Coaches Matched on the brief ----
+    // ---- 2a. Accumulate Coaches Matched on the brief, with post-scrape filters ----
+    // Some filters can't be applied at scrape time (ACTC has no ICF checkbox).
+    // We apply them here when linking coaches to the Brief: every coach in the
+    // master Coaches table is preserved, but only matching ones link to the Brief.
+    const briefCreds = (brief.getCellValue("Credentials") || []).map(c => c.name);
+    const requiresActc = briefCreds.includes("ACTC");
+
+    const newCoachRefs = (scrapeRun.getCellValue("Coaches") || []);
+
+    let filteredNewCoachIds;
+    if (requiresActc) {
+        // Need each coach's Credentials to filter. Look them up in a batch.
+        const lookups = await Promise.all(newCoachRefs.map(c =>
+            coachesTable.selectRecordAsync(c.id, { fields: ["Credentials"] })
+        ));
+        filteredNewCoachIds = lookups
+            .filter(rec => rec && (rec.getCellValue("Credentials") || [])
+                                    .some(opt => opt.name === "ACTC"))
+            .map(rec => rec.id);
+        console.log(
+            `  ACTC filter: ${filteredNewCoachIds.length}/${newCoachRefs.length} coaches passed`
+        );
+    } else {
+        filteredNewCoachIds = newCoachRefs.map(c => c.id);
+    }
+
     const existingCoachIds = new Set(
         (brief.getCellValue("Coaches Matched") || []).map(c => c.id)
     );
-    const newCoachIds = (scrapeRun.getCellValue("Coaches") || []).map(c => c.id);
-    for (const cid of newCoachIds) existingCoachIds.add(cid);
+    for (const cid of filteredNewCoachIds) existingCoachIds.add(cid);
     const allCoachIds = Array.from(existingCoachIds).map(id => ({ id }));
 
     // ---- 2b. Build the multi-country summary ----

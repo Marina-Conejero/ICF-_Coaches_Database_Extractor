@@ -35,14 +35,21 @@ on:
         description: 'JSON array of org types (Global/Multi-national, Nonprofit/NGO)'
         required: false
         default: '[]'
-  # Quarterly auto-refresh disabled until we confirm with Caitlin/Sama how
-  # often they actually want re-scrapes. Re-enable by uncommenting.
-  # The cron runs at 02:00 UTC on the 1st of January, April, July, October.
-  # Currently it would fail anyway because no countries/credentials are
-  # passed in the cron payload — needs a default-params block in `prepare`
-  # before this is safe to fire.
-  # schedule:
-  #   - cron: '0 2 1 1,4,7,10 *'
+      type_of_client:
+        description: 'Single value: Organizational, Personal, or empty for any'
+        required: false
+        default: ''
+      industry_sectors:
+        description: 'JSON array of industry sectors (see scraper.py for valid names)'
+        required: false
+        default: '[]'
+      gender:
+        description: 'Male, Female, or empty for any'
+        required: false
+        default: ''
+  # Auto-refresh lives in refresh.yml, which runs every 6 months and fans out
+  # via repository_dispatch (one dispatch per active brief). Caitlin's
+  # preferred cadence: every 6 months. See refresh.yml for details.
 
 jobs:
   # ---- Job 1: build the matrix from the trigger payload --------------------
@@ -62,6 +69,9 @@ jobs:
           MANUAL_CREDENTIALS: ${{ github.event.inputs.credentials }}
           MANUAL_LANGUAGES: ${{ github.event.inputs.languages }}
           MANUAL_COACHED: ${{ github.event.inputs.coached_organizations }}
+          MANUAL_TOC: ${{ github.event.inputs.type_of_client }}
+          MANUAL_INDUSTRIES: ${{ github.event.inputs.industry_sectors }}
+          MANUAL_GENDER: ${{ github.event.inputs.gender }}
         run: |
           python3 - <<'PY'
           import json, os
@@ -74,6 +84,9 @@ jobs:
                   "credentials": json.loads(os.environ.get("MANUAL_CREDENTIALS", "[]") or "[]"),
                   "languages": json.loads(os.environ.get("MANUAL_LANGUAGES", "[]") or "[]"),
                   "coached_organizations": json.loads(os.environ.get("MANUAL_COACHED", "[]") or "[]"),
+                  "type_of_client": os.environ.get("MANUAL_TOC", "") or "",
+                  "industry_sectors": json.loads(os.environ.get("MANUAL_INDUSTRIES", "[]") or "[]"),
+                  "gender": os.environ.get("MANUAL_GENDER", "") or "",
               }
           countries = payload.get("countries") or []
           if not countries:

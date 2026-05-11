@@ -316,7 +316,7 @@ def process_coach(coach: dict,
     if f.get("In Workable") and f.get("Workable ID"):
         airtable_update(airtable, COACHES_TABLE, coach_id, {
             "Marked for Push": False,
-            "Push Status": "Already in Workable",
+            "Push Status": "Flagged for Review",
         })
         write_sync_log(airtable, coach_id, "Skip Duplicate", "Duplicate Skipped",
                        body="Already flagged In Workable")
@@ -342,7 +342,7 @@ def process_coach(coach: dict,
             "Workable Stage": existing.get("stage"),
             "Workable Stage Kind": existing.get("stage_kind"),
             "Workable Profile URL": existing.get("profile_url"),
-            "Push Status": "Already in Workable",
+            "Push Status": "Flagged for Review",
         })
         write_sync_log(airtable, coach_id, "Skip Duplicate", "Duplicate Skipped",
                        code=200, body=f"Existing Workable id {existing.get('id')}")
@@ -412,7 +412,7 @@ def post_slack_summary(stats: dict, failures: list[dict]) -> None:
         f"*Workable push complete*",
         "",
         f"✅ Pushed: *{stats['pushed']}*",
-        f"🟡 Already in Workable: *{stats['duplicate']}*",
+        f"🟡 Flagged for review (already in Workable): *{stats['duplicate']}*",
         f"❌ Errors: *{stats['error']}*",
     ]
     if failures:

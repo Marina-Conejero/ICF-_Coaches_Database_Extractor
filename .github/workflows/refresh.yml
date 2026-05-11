@@ -1,0 +1,152 @@
+name: Six-Monthly Brief Refresh
+
+# Runs on the 1st of January and July at 02:00 UTC, re-running every active
+# Search Brief so coach data stays fresh. Per Caitlin (May 7 2026 call):
+#   "every six months — credentials last 3 years but there's always people
+#    getting the credential or moving up to the next one. Twice a year
+#    catches more for us."
+#
+# Active = Search Brief Status is NOT 'Closed'. So any brief still open, in
+# triggered state, ready for review, or already pushed gets refreshed.
+#
+# Manually runnable via the Actions tab too (workflow_dispatch).
+
+on:
+  schedule:
+    - cron: '0 2 1 1,7 *'   # 02:00 UTC, 1st of January and July
+  workflow_dispatch: {}
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Refresh all active briefs
+        env:
+          AIRTABLE_PAT: ${{ secrets.AIRTABLE_PAT }}
+          GITHUB_PAT:   ${{ secrets.WORKFLOW_DISPATCH_PAT }}
+        run: |
+          python3 - <<'PY'
+          import json, os, sys, time
+          import requests
+
+          BASE_ID = "appKgfCoWcqDKhcnw"
+          BRIEFS_TABLE = "tblOuwNY72dpqdzds"
+          COUNTRIES_TABLE = "tblaaQcQb9D8yWS0c"
+
+          GH_OWNER = "Marina-Conejero"
+          GH_REPO  = "ICF-_Coaches_Database_Extractor"
+
+          pat = os.environ.get("AIRTABLE_PAT")
+          gh_pat = os.environ.get("GITHUB_PAT")
+          if not pat or not gh_pat:
+              sys.exit("Missing AIRTABLE_PAT or GITHUB_PAT (WORKFLOW_DISPATCH_PAT secret).")
+
+          air = requests.Session()
+          air.headers.update({"Authorization": f"Bearer {pat}",
+                              "Content-Type": "application/json"})
+
+          # Load country-name → ICF code lookup
+          codes = {}
+          url = f"https://api.airtable.com/v0/{BASE_ID}/{COUNTRIES_TABLE}"
+          params = {"pageSize": 100, "fields[]": ["Country Name", "ICF Code"]}
+          while True:
+              r = air.get(url, params=params); r.raise_for_status()
+              data = r.json()
+              for rec in data.get("records", []):
+                  f = rec.get("fields", {})
+                  if f.get("Country Name") and f.get("ICF Code"):
+                      codes[f["Country Name"].lower()] = f["ICF Code"]
+              if not data.get("offset"):
+                  break
+              params["offset"] = data["offset"]
+              time.sleep(0.3)
+
+          # Pull every brief that's not Closed
+          burl = f"https://api.airtable.com/v0/{BASE_ID}/{BRIEFS_TABLE}"
+          formula = "NOT({Status} = 'Closed')"
+          briefs = []
+          p = {"pageSize": 100, "filterByFormula": formula}
+          while True:
+              r = air.get(burl, params=p); r.raise_for_status()
+              data = r.json()
+              briefs.extend(data.get("records", []))
+              if not data.get("offset"):
+                  break
+              p["offset"] = data["offset"]
+              time.sleep(0.3)
+
+          print(f"Found {len(briefs)} active briefs to refresh.")
+
+          dispatched = 0
+          for b in briefs:
+              f = b.get("fields", {})
+              brief_id   = b["id"]
+              brief_name = f.get("Brief Name", brief_id)
+
+              # Resolve country links → list of {name, code}
+              # The "Countries" link field gives record IDs only; we need names.
+              country_link_ids = [c["id"] if isinstance(c, dict) else c
+                                  for c in (f.get("Countries") or [])]
+              if not country_link_ids:
+                  print(f"  ⏭  {brief_name}: no countries linked, skipping")
+                  continue
+
+              country_payload = []
+              for cid in country_link_ids:
+                  rr = air.get(f"{url}/{cid}")
+                  if rr.status_code >= 400:
+                      continue
+                  cf = rr.json().get("fields", {})
+                  nm = cf.get("Country Name")
+                  code = cf.get("ICF Code", "")
+                  if nm:
+                      country_payload.append({"name": nm, "code": code})
+                  time.sleep(0.1)
+
+              if not country_payload:
+                  print(f"  ⏭  {brief_name}: country lookup failed, skipping")
+                  continue
+
+              payload = {
+                  "event_type": "run-scraper",
+                  "client_payload": {
+                      "run_label": f"{brief_name}__refresh",
+                      "brief_id": brief_id,
+                      "submitter": "Six-Monthly Refresh",
+                      "countries": country_payload,
+                      "credentials": f.get("Credentials") or ["ACC","PCC","MCC"],
+                      "languages": f.get("Languages") or [],
+                      "coached_organizations": f.get("Coached Organizations") or [],
+                      "type_of_client": f.get("Type of Client", ""),
+                      "industry_sectors": f.get("Industry Sectors") or [],
+                      "gender": f.get("Gender", ""),
+                  }
+              }
+
+              gh_url = f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/dispatches"
+              gr = requests.post(gh_url, json=payload, headers={
+                  "Accept": "application/vnd.github+json",
+                  "Authorization": f"Bearer {gh_pat}",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "Content-Type": "application/json",
+              })
+              if gr.status_code == 204:
+                  print(f"  ✓  {brief_name}: dispatched ({len(country_payload)} countries)")
+                  dispatched += 1
+              else:
+                  print(f"  ✗  {brief_name}: dispatch failed {gr.status_code} {gr.text}")
+              time.sleep(1.5)   # spread the runs so we don't slam matrix limits
+
+          print(f"\nDone. Dispatched {dispatched}/{len(briefs)} briefs.")
+          PY
