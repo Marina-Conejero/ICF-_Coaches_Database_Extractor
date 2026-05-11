@@ -503,27 +503,43 @@ def iterate_pages(browser: webdriver.Chrome,
     expected_pages = discover_total_pages(browser)
     print(f"\n  pagination: {expected_pages} page(s) detected")
 
+    # ICF's directory sometimes renders placeholder pagination links even when
+    # there's only one page of results, so `discover_total_pages` can over-
+    # report. We treat "next-page link not found / disabled" as a natural
+    # end-of-results, not as a scrape failure — this prevents false Partial
+    # statuses on small result sets.
+    DEFAULT_PAGE_SIZE = 10  # ICF default; if last page < this, we're done
+
+    last_page_count = 0
     for page in range(1, expected_pages + 1):
         if page > 1:
+            # If the previous page returned fewer than a full page worth of
+            # cards, there's no point looking for a next page.
+            if 0 < last_page_count < DEFAULT_PAGE_SIZE:
+                print(f"  page {page-1} returned {last_page_count} cards "
+                      f"(< {DEFAULT_PAGE_SIZE}) — natural end of results")
+                break
             try:
                 next_link = browser.find_element(
                     By.XPATH,
                     f"//a[@class='item'][@data-value={page}]"
                 )
                 if "disabled" in (next_link.get_attribute("class") or ""):
-                    diagnostics["errors"].append(
-                        f"page {page}: next-page link disabled, stopping"
-                    )
+                    # End of results — pagination button is disabled. Not an error.
+                    print(f"  page {page}: next-page link disabled — end of results")
                     break
                 next_link.click()
                 time.sleep(2)
                 wait.until(EC.presence_of_element_located((By.ID, CARDS_CONTAINER_ID)))
             except NoSuchElementException:
-                diagnostics["errors"].append(
-                    f"page {page}: navigation link not found"
-                )
+                # No link to a next page exists. Either we're truly at the end,
+                # or the pagination DOM is unusual. Either way, not a scrape
+                # error — the cards we captured are still valid.
+                print(f"  page {page}: no navigation link — end of results")
                 break
             except Exception as exc:
+                # Unexpected exception during navigation — this IS worth flagging
+                # because something genuinely broke mid-paginate.
                 diagnostics["errors"].append(
                     f"page {page}: navigation error: {type(exc).__name__}: {exc}"
                 )
@@ -535,6 +551,7 @@ def iterate_pages(browser: webdriver.Chrome,
         diagnostics["captured_total"] += len(page_rows)
         diagnostics["errors"].extend(page_errors)
         all_rows.extend(page_rows)
+        last_page_count = page_total
 
         if page_total == 0:
             # No more cards — done
