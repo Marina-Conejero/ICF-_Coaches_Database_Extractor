@@ -518,6 +518,7 @@ class AirtableWriter:
                 row.get("Has Prior Experience Delivering Coach Skills Training to Managers/Leaders")
             ),
             "Can Provide": split_multiselect(row.get("Can Provide")) or None,
+            "Gender": (row.get("Gender") or "").strip() or None,
             "ICF Profile URL": normalise_url(row.get("ICF Profile URL")),
             "Source": "ICF Scrape",
             "Scrape Run": [scrape_run_id],
