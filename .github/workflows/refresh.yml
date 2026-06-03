@@ -44,7 +44,7 @@ jobs:
           BRIEFS_TABLE = "tblOuwNY72dpqdzds"
           COUNTRIES_TABLE = "tblaaQcQb9D8yWS0c"
 
-          GH_OWNER = "Marina-Conejero"
+          GH_OWNER = "marina-conejero-r"
           GH_REPO  = "ICF-_Coaches_Database_Extractor"
 
           pat = os.environ.get("AIRTABLE_PAT")

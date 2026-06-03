@@ -23,7 +23,7 @@
 const config = input.config();
 const controlRecordId = config.controlRecordId;
 
-const GITHUB_OWNER = "Marina-Conejero";
+const GITHUB_OWNER = "marina-conejero-r";
 const GITHUB_REPO  = "ICF-_Coaches_Database_Extractor";
 const GITHUB_PAT   = "REPLACE_WITH_GITHUB_PAT_REPO_SCOPE";
 
